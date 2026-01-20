@@ -9,22 +9,163 @@ services:
     ports:
       - "5436:5432"
     volumes: 
-      - ./init:/docker-entrypoint-initdb.d
+      - ./database/migrations:/docker-entrypoint-initdb.d
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - spark-network
   redis:
     image: redis:7
     container_name: redis_db
     restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
-  
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    container_name: redis_commander
+    volumes:
+      - redis_data:/data
+    networks:
+      - spark-network
+
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    container_name: redis_insight
     restart: unless-stopped
-    environment:
-      - REDIS_HOSTS=local:redis:6379
     ports:
-      - "8081:8081"
+      - "8081:8001"
+    environment:
+      - RI_APP_HOST=0.0.0.0
+      - RI_APP_PORT=8001
     depends_on:
       - redis
+    networks:
+      - spark-network
+
+  spark-master:
+    image: apache/spark:3.5.1-python3
+    container_name: spark_master
+    restart: unless-stopped
+    entrypoint: ["/opt/spark/bin/spark-class"]
+    command: ["org.apache.spark.deploy.master.Master"]
+    ports:
+      - "8080:8080"  # Spark Web UI
+      - "7077:7077"  # Spark Master port
+    volumes:
+      - ./spark-data:/opt/spark/work
+      - ./spark/jobs:/opt/spark/scripts
+      - ./spark/services:/opt/spark/services
+      - ./spark-ivy-cache:/home/spark/.ivy2
+    networks:
+      - spark-network
+
+  spark-worker:
+    image: apache/spark:3.5.1-python3
+    container_name: spark_worker
+    restart: unless-stopped
+    entrypoint: ["/opt/spark/bin/spark-class"]
+    command: ["org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+    depends_on:
+      - spark-master
+    volumes:
+      - ./spark-data:/opt/spark/work
+      - ./spark/jobs:/opt/spark/scripts
+      - ./spark/services:/opt/spark/services
+      - ./spark-ivy-cache:/home/spark/.ivy2
+    networks:
+      - spark-network
+
+  spark-scheduler:
+    image: apache/spark:3.5.1-python3
+    container_name: spark_scheduler
+    restart: unless-stopped
+    entrypoint: ["python3"]
+    command: ["/opt/spark/scripts/spark-scheduler.py"]
+    depends_on:
+      - spark-master
+      - postgres
+    volumes:
+      - ./spark/jobs:/opt/spark/scripts
+      - ./spark-ivy-cache:/home/spark/.ivy2
+    networks:
+      - spark-network
+
+  auto-seed:
+    image: python:3.11-slim
+    container_name: auto_seed
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        pip install --quiet psycopg2-binary && python3 /app/services/auto_seed.py
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - SEED_INTERVAL=30
+    depends_on:
+      - postgres
+    volumes:
+      - .:/app
+    networks:
+      - spark-network
+
+  auto-cache-redis:
+    image: python:3.11-slim
+    container_name: auto_cache_redis
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        pip install --quiet psycopg2-binary redis && python3 /app/services/auto_cache_to_redis.py
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CACHE_INTERVAL=30
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - .:/app
+    networks:
+      - spark-network
+
+  auto-analyze-postgres:
+    image: apache/spark:3.5.1-python3
+    container_name: auto_analyze_postgres
+    restart: unless-stopped
+    entrypoint: ["python3"]
+    command: ["/opt/spark/services/auto_analyze_postgres.py"]
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - ANALYSIS_INTERVAL=60
+    depends_on:
+      - spark-master
+      - postgres
+    volumes:
+      - ./spark/services:/opt/spark/services
+      - ./spark/jobs:/opt/spark/scripts
+      - ./spark-ivy-cache:/home/spark/.ivy2
+    networks:
+      - spark-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  spark-network:
+    driver: bridge
   
