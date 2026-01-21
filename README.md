@@ -1,4 +1,4 @@
-# Ahmed Help - Data Pipeline & Analytics Platform
+# thmanyah - Data Pipeline & Analytics Platform
 
 A complete data pipeline system with PostgreSQL, Redis, Spark, and automated services for data seeding, streaming, analysis, and caching.
 
